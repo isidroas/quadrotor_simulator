@@ -34,6 +34,7 @@ IMAGE_EXTENSION = 'pdf'
 # Fusion flags
 FUSE_GPS = True
 
+HANDLE_DELAYS= False
 
 
 # Control se realiza sobre los estados reales para acotar más el efecto del estimador
@@ -255,7 +256,7 @@ def main():
         gyro_delayed = delayed_meas['gyro']     if 'gyro' in delayed_meas.keys() else None
         gps_delayed = delayed_meas['gps']       if 'gps' in delayed_meas.keys() else None
 
-        [p_est[:,i], v_est[:,i], theta_est[i], P_est[:,:,i]] = ekf_estimator(p_est[:,i-1], v_est[:,i-1], theta_est[i-1] ,P_est[:,:,i-1], accel[:,i], gyro[i], gps=gps[:,i])
+        [p_est[:,i], v_est[:,i], theta_est[i], P_est[:,:,i]] = ekf_estimator(p_est[:,i-1], v_est[:,i-1], theta_est[i-1] ,P_est[:,:,i-1], accel[:,i], gyro[i], gps=gps[:,i]) if HANDLE_DELAYS else ekf_estimator(p_est[:,i-1], v_est[:,i-1], theta_est[i-1] ,P_est[:,:,i-1], accel_delayed, gyro_delayed, gps=gps_delayed)
 
 
     #create result folders
