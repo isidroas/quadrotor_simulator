@@ -6,6 +6,8 @@ import matplotlib
 matplotlib.rcParams['text.usetex'] = True
 import time
 from pdb import set_trace
+import os 
+import datetime
 
 
 # Parameters
@@ -21,6 +23,7 @@ ACCEL_NOISE = 1 # m/s^2
 GYRO_NOISE = 0.03 # rad/s
 #GPS_NOISE= 0.7 # m 
 GPS_NOISE= 0.5 # m 
+GPS_DELAY= 0 # s
 VISION_NOISE = 0.05 # m 
 
 # Plot flags
@@ -32,6 +35,7 @@ IMAGE_EXTENSION = 'pdf'
 FUSE_GPS = True
 
 
+
 # Control se realiza sobre los estados reales para acotar más el efecto del estimador
 def control_actuators(theta: float, thetad: float ,theta_ref:float, yd_e: float) -> [float,float]:
     # Control gains
@@ -41,6 +45,77 @@ def control_actuators(theta: float, thetad: float ,theta_ref:float, yd_e: float)
     thrust = MASS*G_CONSTANT/np.cos(theta) + yd_e*K_height
     torque = (theta_ref-theta)*K_tilt -thetad*Kd_tilt
     return thrust, torque
+
+# Error en la predicción 
+Q = np.zeros( (5,5) )
+
+# Jacobianos de los modelos de observación 
+H_vision = np.zeros((2,5))
+H_vision[0,0]=1
+H_vision[1,1]=1
+R_vision = np.diag([VISION_NOISE**2, VISION_NOISE**2])
+
+H_gps = np.zeros((2,5))
+H_gps[0,0]=1
+H_gps[1,1]=1
+R_gps = np.diag([GPS_NOISE**2, GPS_NOISE**2])
+
+
+def ekf_estimator(p_prev, v_prev, theta_prev, cov_mat_prev, accel, gyro, gps=None) -> list:
+    # Prediction de los estados
+    theta_pred = theta_prev + DT*gyro 
+    c = np.cos(theta_pred) 
+    s = np.sin(theta_pred)
+    # TODO: utilizar aquí el predicho ahora o el estimado anterior?
+    #c = np.cos(theta_prev) 
+    #s = np.sin(theta_prev)
+    rot_mat = np.array([[c, -s], [s, c]])
+    v_pred = v_prev + DT*rot_mat @ accel 
+    p_pred = p_prev + DT*v_prev 
+
+    # Predicción de la matriz de covarianzas
+    x_pred=np.array([p_pred[0], p_pred[1], v_pred[0], v_pred[1], theta_pred])
+    F = np.array([
+                   [1,0,DT,0 ,0],
+                   [0,1,0 ,DT,0],
+                   [0,0,1 ,0,DT*(-accel[0]*np.sin(theta_pred) + accel[1]*np.cos(theta_pred) )], 
+                   [0,0,0 ,1,DT*(-accel[0]*np.cos(theta_pred) - accel[1]*np.sin(theta_pred) )],
+                   [0,0,0 ,0 ,1],
+        ])
+    G = np.array([
+            [0      ,0      ,0],
+            [0      ,0      ,0], # que pasaría si desarrollo v(a) aquí?
+            [DT*c   ,DT*s   ,0],
+            [-DT*s  , DT*c  ,0],
+            [0      ,0      ,DT],
+            
+        ])
+    Q = G @ np.diag([ACCEL_NOISE**2, ACCEL_NOISE**2, GYRO_NOISE**2]) @ np.transpose(G)
+    P_pred = np.zeros((5,5))
+    cov_mat_est = F @ cov_mat_prev @ np.transpose(F) + Q 
+
+    x_est = x_pred
+    p_est = x_est[0:2] # Remind slices x:y doesn't include y
+    v_est = x_est[2:4]
+    theta_est = x_est[4]
+    cov_mat = cov_mat_est
+
+    ### Update
+
+    ## gps
+    if FUSE_GPS:
+        innov = gps - p_est
+        S_gps = H_gps @ cov_mat @ np.transpose(H_gps) + R_gps
+        K_f = cov_mat @ np.transpose(H_gps) @ np.linalg.inv(S_gps)
+        x_est = x_est + K_f @ innov 
+        p_est = x_est[0:2] # Remind slices x:y doesn't include y
+        v_est = x_est[2:4]
+        theta_est = x_est[4]
+        cov_mat = cov_mat - K_f @ H_gps @ cov_mat
+
+    return p_est, v_est, theta_est, cov_mat
+     
+    
 
 def draw_animation(x,y,theta):
     import numpy as np
@@ -142,9 +217,13 @@ def main():
         # simulate sensors
         accel_gt[:,i] = np.linalg.inv(rot_mat) @ a[:,i]
         accel[:,i] = accel_gt[:,i] + randn(2)*ACCEL_NOISE # TODO: Habría que multiplicarlo por la inversa de rot_mat?
-        gps[:,i] = p[:,i] + randn(2)*GPS_NOISE
-        vision[:,i] = p[:,i] + randn(2)*VISION_NOISE
         gyro[i] = thetad[i] + randn(1)*GYRO_NOISE
+        if i>GPS_DELAY/DT:
+            gps[:,i] = p[:,int(i-GPS_DELAY/DT)] + randn(2)*GPS_NOISE
+        else:
+            gps[:,i] = None
+        vision[:,i] = p[:,i] + randn(2)*VISION_NOISE
+
 
         
     # States estimation
@@ -155,83 +234,38 @@ def main():
     # Matriz de covarianzas
     P_est = np.zeros( (5,5,DATA_L) )
 
-    # Error en la predicción # TODO: calcularlo a partir de los ruidos de los sensores
-    Q = np.zeros( (5,5) )
 
-    # Jacobianos de los modelos de observación 
-    H_vision = np.zeros((2,5))
-    H_vision[0,0]=1
-    H_vision[1,1]=1
-    R_vision = np.diag([VISION_NOISE**2, VISION_NOISE**2])
-
-    H_gps = np.zeros((2,5))
-    H_gps[0,0]=1
-    H_gps[1,1]=1
-    R_gps = np.diag([GPS_NOISE**2, GPS_NOISE**2])
+    # buffer 
+    max_delay = max(GPS_DELAY,0)
+    buffer_size = int(max_delay/DT) # TODO: redondear hacia arriba? 
+    buffer_ekf = [{}] * buffer_size
+    gps_insert_pos = int(GPS_DELAY/DT)-1
 
     # Initalization 
     for i in range(1,DATA_L):
-        # Prediction de los estados
-        theta_pred = theta_est[i-1] + DT*gyro[i] 
-        c = np.cos(theta_pred) 
-        s = np.sin(theta_pred)
-        # TODO: utilizar aquí el predicho ahora o el estimado anterior?
-        #c = np.cos(theta_est[i-1]) 
-        #s = np.sin(theta_est[i-1])
-        rot_mat = np.array([[c, -s], [s, c]])
-        v_pred = v_est[:,i-1] + DT*rot_mat @ accel[:,i] 
-        p_pred = p_est[:,i-1] + DT*v_est[:,i-1] 
+        ## Fill buffer
+        # Sensors with no delay (pos 0)
+        buffer_ekf.insert(0, {'accel':accel[:,i],'gyro':gyro[i]})
+        # gps 
+        buffer_ekf[gps_insert_pos]['gps'] = gps[:,i]      
+        
+        ## Pop buffer
+        delayed_meas = buffer_ekf.pop()
+        accel_delayed = delayed_meas['accel']   if 'accel' in delayed_meas.keys() else None
+        gyro_delayed = delayed_meas['gyro']     if 'gyro' in delayed_meas.keys() else None
+        gps_delayed = delayed_meas['gps']       if 'gps' in delayed_meas.keys() else None
 
-        # Predicción de la matriz de covarianzas
-        x_pred=np.array([p_pred[0], p_pred[1], v_pred[0], v_pred[1], theta_pred])
-        F = np.array([
-                       [1,0,DT,0 ,0],
-                       [0,1,0 ,DT,0],
-                       [0,0,1 ,0,DT*(-accel[0,i]*np.sin(theta_pred) + accel[1,i]*np.cos(theta_pred) )], 
-                       [0,0,0 ,1,DT*(-accel[0,i]*np.cos(theta_pred) - accel[1,i]*np.sin(theta_pred) )],
-                       [0,0,0 ,0 ,1],
-            ])
-        G = np.array([
-                [0      ,0      ,0],
-                [0      ,0      ,0], # que pasaría si desarrollo v(a) aquí?
-                [DT*c   ,DT*s   ,0],
-                [-DT*s  , DT*c  ,0],
-                [0      ,0      ,DT],
-                
-            ])
-        Q = G @ np.diag([ACCEL_NOISE**2, ACCEL_NOISE**2, GYRO_NOISE**2]) @ np.transpose(G)
-        P_pred = np.zeros((5,5))
-        P_pred = F @ P_est[:,:,i-1] @ np.transpose(F) + Q 
+        [p_est[:,i], v_est[:,i], theta_est[i], P_est[:,:,i]] = ekf_estimator(p_est[:,i-1], v_est[:,i-1], theta_est[i-1] ,P_est[:,:,i-1], accel[:,i], gyro[i], gps=gps[:,i])
 
-        x_est = x_pred
-        p_est[:,i] = x_est[0:2] # Remind slices x:y doesn't include y
-        v_est[:,i] = x_est[2:4]
-        theta_est[i] = x_est[4]
-        P_est[:,:,i] = P_pred
 
-        ### Update
-        ## vision
-        #innov = vision[:,i] - p_pred[:,i]
-        #S_vision = H_vision @ P_pred @ np.transpose(H_vision) + R_vision
-        #K_f = P_pred @ np.transpose(H_vision) @ np.linalg.inv(S_vision)
-        #x_est = x_est + K_f @ innov 
-        #p_est[:,i] = x_est[0:2] # Remind slices x:y doesn't include y
-        #v_est[:,i] = x_est[2:4]
-        #theta_est[i] = x_est[4]
-        #p_est[:,i] = x_est[1:2]
-        #P[:,:,i] = P_pred + K_f @ H_vision @ P_pred
-
-        ## gps
-        if FUSE_GPS:
-            innov = gps[:,i] - p_est[:,i]
-            S_gps = H_gps @ P_est[:,:,i] @ np.transpose(H_gps) + R_gps
-            K_f = P_est[:,:,i] @ np.transpose(H_gps) @ np.linalg.inv(S_gps)
-            x_est = x_est + K_f @ innov 
-            p_est[:,i] = x_est[0:2] # Remind slices x:y doesn't include y
-            v_est[:,i] = x_est[2:4]
-            theta_est[i] = x_est[4]
-            P_est[:,:,i] = P_est[:,:,i] - K_f @ H_gps @ P_est[:,:,i]
+    #create result folders
+    subdir_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    results_path = IMAGE_FOLDER + subdir_name + os.sep
+    os.makedirs(results_path) 
     
+    # save parameters
+    with open(results_path + 'parametros.txt','w') as f:
+        f.write(str(globals()))
 
     # Plot results
     fig, ax = plt.subplots()
@@ -243,7 +277,7 @@ def main():
     plt.xlabel('t (s)')
     plt.ylabel('$P_x$ (m)')
     ax.legend()
-    plt.savefig(IMAGE_FOLDER + 'x_t.' + IMAGE_EXTENSION)
+    plt.savefig(results_path + 'x_t.' + IMAGE_EXTENSION)
 
     fig, ax = plt.subplots()
     ax.set_title('Y position versus time')
@@ -254,7 +288,7 @@ def main():
     plt.xlabel('t (s)')
     plt.ylabel('$P_y$ (m)')
     ax.legend()
-    plt.savefig(IMAGE_FOLDER + 'y_t.' + IMAGE_EXTENSION)
+    plt.savefig(results_path + 'y_t.' + IMAGE_EXTENSION)
 
     fig, ax = plt.subplots()
     ax.set_title('Velocity versus time')
@@ -268,7 +302,7 @@ def main():
     plt.xlabel('t (s)')
     plt.ylabel('$V$ (m/s)')
     ax.legend()
-    plt.savefig(IMAGE_FOLDER + 'V.' + IMAGE_EXTENSION)
+    plt.savefig(results_path + 'V.' + IMAGE_EXTENSION)
 
     fig, ax = plt.subplots()
     ax.set_title('Tilt versus time')
@@ -279,7 +313,7 @@ def main():
     plt.xlabel('t (s)')
     plt.ylabel(r'$\theta$ (rad)')
     ax.legend()
-    plt.savefig(IMAGE_FOLDER + 'theta.' + IMAGE_EXTENSION)
+    plt.savefig(results_path + 'theta.' + IMAGE_EXTENSION)
 
     fig, ax = plt.subplots()
     ax.set_title('Y versus X')
@@ -290,7 +324,7 @@ def main():
     plt.ylabel('$P_y$ (m)')
     ax.legend()
     ax.set_aspect('equal')
-    plt.savefig(IMAGE_FOLDER + 'tray.' + IMAGE_EXTENSION)
+    plt.savefig(results_path + 'tray.' + IMAGE_EXTENSION)
 
     # Sensors
     fig, ax = plt.subplots()
@@ -302,7 +336,7 @@ def main():
     plt.xlabel('t (s)')
     plt.ylabel('a (m/s)')
     ax.legend()
-    plt.savefig(IMAGE_FOLDER + 'accel.' + IMAGE_EXTENSION)
+    plt.savefig(results_path + 'accel.' + IMAGE_EXTENSION)
 
     fig, ax = plt.subplots()
     ax.set_title(r'Gyro ($\omega$)')
@@ -311,7 +345,7 @@ def main():
     plt.xlabel('t (s)')
     plt.ylabel(r'$\omega$ (rad/s)')
     ax.legend()
-    plt.savefig(IMAGE_FOLDER + 'gyro.' + IMAGE_EXTENSION)
+    plt.savefig(results_path + 'gyro.' + IMAGE_EXTENSION)
 
     fig, ax = plt.subplots()
     ax.set_title('GPS')
@@ -321,7 +355,7 @@ def main():
     plt.ylabel('$P_y$ (m)')
     ax.legend()
     ax.set_aspect('equal')
-    plt.savefig(IMAGE_FOLDER + 'gps.' + IMAGE_EXTENSION)
+    plt.savefig(results_path + 'gps.' + IMAGE_EXTENSION)
 
     fig, ax = plt.subplots()
     ax.set_title('Elementos diagonales de la matriz de covarianzas')
@@ -333,7 +367,7 @@ def main():
     plt.xlabel('$t$ (s)')
     plt.ylabel('m,m,m/s,m/s,rad')
     ax.legend()
-    plt.savefig(IMAGE_FOLDER + 'P_est_diag.' + IMAGE_EXTENSION)
+    plt.savefig(results_path + 'P_est_diag.' + IMAGE_EXTENSION)
 
     fig, ax = plt.subplots()
     ax.set_title('Matriz de covarianzas')
@@ -354,7 +388,7 @@ def main():
     ax.plot(t,P_est[3,3,:],label='$V_y$', linestyle="--")
     plt.xlabel('$t$ (s)')
     ax.legend()
-    plt.savefig(IMAGE_FOLDER + 'P_est' + IMAGE_EXTENSION)
+    plt.savefig(results_path + 'P_est' + IMAGE_EXTENSION)
 
 
     plt.show()
