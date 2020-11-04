@@ -22,24 +22,25 @@ DT = 0.01  # s # Reducir el paso mejora la precisión de la predicción, aunque 
 ACCEL_NOISE = 1  # m/s^2
 # GYRO_NOISE = 0.015 # rad/s
 GYRO_NOISE = 0.03  # rad/s
-# GPS_NOISE= 0.7 # m
-GPS_NOISE = 0.0  # m
-GPS_DELAY = 0.2  # s
+GPS_NOISE= 0.7 # m
+#GPS_NOISE = 0.0  # m
+#GPS_DELAY = 0.2  # s
+GPS_DELAY = 0  # s
 VISION_NOISE = 0.05  # m
 
 # Plot flags
 DRAW_ESTIMATED = True
+SHOW_ANIMATED = False
+SHOW_PLOTS = False
+SHOW_OUTPUT_FILT = True
 IMAGE_FOLDER = "images/"
 IMAGE_EXTENSION = "png"
 
 # Fusion flags
 FUSE_GPS = True
 
-HANDLE_DELAYS = True
+HANDLE_DELAYS = False
 
-# Plots
-SHOW_ANIMATED = False
-SHOW_PLOTS = False
 
 
 # Control se realiza sobre los estados reales para acotar más el efecto del estimador
@@ -55,8 +56,6 @@ def control_actuators(
     return thrust, torque
 
 
-# Error en la predicción
-Q = np.zeros((5, 5))
 
 # Jacobianos de los modelos de observación
 H_vision = np.zeros((2, 5))
@@ -69,6 +68,27 @@ H_gps[0, 0] = 1
 H_gps[1, 1] = 1
 R_gps = np.diag([GPS_NOISE ** 2, GPS_NOISE ** 2])
 
+def output_filter( 
+    p_prev, v_prev, theta_prev, accel, gyro
+) -> list:
+
+    if np.isnan(p_prev[0]):
+        # we need to initialize
+        p_prev = np.array([0,0])
+        v_prev = np.array([0,0])
+        theta_prev = 0
+
+    theta_pred = theta_prev + DT * gyro
+    #c = np.cos(theta_pred)
+    #s = np.sin(theta_pred)
+    # TODO: utilizar aquí el predicho ahora o el estimado anterior?
+    c = np.cos(theta_prev)
+    s = np.sin(theta_prev)
+    rot_mat = np.array([[c, -s], [s, c]])
+    v_pred = v_prev + DT * rot_mat @ accel
+    p_pred = p_prev + DT * v_prev
+    return p_pred, v_pred, theta_pred
+    
 
 def ekf_estimator(
     p_prev, v_prev, theta_prev, cov_mat_prev, accel, gyro, gps=None
@@ -83,15 +103,15 @@ def ekf_estimator(
         p_prev = np.array([0,0])
         v_prev = np.array([0,0])
         theta_prev = 0
-        cov_mat_prev = np.zeros([5,5])
+        cov_mat_prev = np.zeros([5,5])# TODO: esto está bien?
         
-    # Prediction de los estados
+    # Predicción de los estados
     theta_pred = theta_prev + DT * gyro
-    c = np.cos(theta_pred)
-    s = np.sin(theta_pred)
+    #c = np.cos(theta_pred)
+    #s = np.sin(theta_pred)
     # TODO: utilizar aquí el predicho ahora o el estimado anterior?
-    # c = np.cos(theta_prev)
-    # s = np.sin(theta_prev)
+    c = np.cos(theta_prev)
+    s = np.sin(theta_prev)
     rot_mat = np.array([[c, -s], [s, c]])
     v_pred = v_prev + DT * rot_mat @ accel
     p_pred = p_prev + DT * v_prev
@@ -107,14 +127,14 @@ def ekf_estimator(
                 0,
                 1,
                 0,
-                DT * (-accel[0] * np.sin(theta_pred) + accel[1] * np.cos(theta_pred)),
+                DT * (-accel[0] * np.sin(theta_prev) + accel[1] * np.cos(theta_prev)),
             ],
             [
                 0,
                 0,
                 0,
                 1,
-                DT * (-accel[0] * np.cos(theta_pred) - accel[1] * np.sin(theta_pred)),
+                DT * (-accel[0] * np.cos(theta_prev) - accel[1] * np.sin(theta_prev)),
             ],
             [0, 0, 0, 0, 1],
         ]
@@ -133,7 +153,6 @@ def ekf_estimator(
         @ np.diag([ACCEL_NOISE ** 2, ACCEL_NOISE ** 2, GYRO_NOISE ** 2])
         @ np.transpose(G)
     )
-    P_pred = np.zeros((5, 5))
     cov_mat_est = F @ cov_mat_prev @ np.transpose(F) + Q
 
     x_est = x_pred
@@ -279,13 +298,19 @@ def main():
             gps[:, i] = None
         vision[:, i] = p[:, i] + randn(2) * VISION_NOISE
 
-    # States estimation
-    v_est = np.empty((2, DATA_L))
-    p_est = np.empty((2, DATA_L))
-    theta_est = np.empty(DATA_L)
+    ### Estimación de los estados ###
+    # States at delayed time horizon
+    v_est = np.empty((2, DATA_L))*np.nan
+    p_est = np.empty((2, DATA_L))*np.nan
+    theta_est = np.empty(DATA_L)*np.nan
+
+    # States at current time horizon
+    v_est_curr = np.empty((2, DATA_L))*np.nan
+    p_est_curr = np.empty((2, DATA_L))*np.nan
+    theta_est_curr = np.empty(DATA_L)*np.nan
 
     # Matriz de covarianzas
-    P_est = np.empty((5, 5, DATA_L))
+    P_est = np.empty((5, 5, DATA_L))*np.nan 
 
     # buffer
     max_delay = max(GPS_DELAY, 0)
@@ -293,7 +318,6 @@ def main():
     buffer_ekf = [{}] * buffer_size
     gps_insert_pos = int(GPS_DELAY / DT) - 1
 
-    # Initalization
     for i in range(1, DATA_L):
         ## Fill buffer
         # Sensors with no delay (pos 0)
@@ -331,6 +355,14 @@ def main():
             )
         )
 
+        [p_est_curr[:, i], v_est_curr[:, i], theta_est_curr[i]] = output_filter(
+                p_est_curr[:, i - 1],
+                v_est_curr[:, i - 1],
+                theta_est_curr[i - 1],
+                accel[:, i],
+                gyro[i],
+            )
+
     # create result folders
     subdir_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     results_path = IMAGE_FOLDER + subdir_name + os.sep
@@ -346,7 +378,8 @@ def main():
     ax.plot(t, p[0, :], label="P groundtruth")
     if DRAW_ESTIMATED:
         ax.plot(t, p_est[0, :], label="P estimated")
-        ax.plot(t, P_est[0, 0, :], label="error estimated")
+        if SHOW_OUTPUT_FILT:
+            ax.plot(t, p_est_curr[0, :], label="P estimated current horizon")
     plt.xlabel("t (s)")
     plt.ylabel("$P_x$ (m)")
     ax.legend()
@@ -357,7 +390,8 @@ def main():
     ax.plot(t, p[1, :], label="P groundtruth")
     if DRAW_ESTIMATED:
         ax.plot(t, p_est[1, :], label="P estimated")
-        ax.plot(t, P_est[1, 1, :], label="error estimated")
+        if SHOW_OUTPUT_FILT:
+            ax.plot(t, p_est_curr[1, :], label="P estimated current horizon")
     plt.xlabel("t (s)")
     plt.ylabel("$P_y$ (m)")
     ax.legend()
@@ -370,8 +404,9 @@ def main():
     if DRAW_ESTIMATED:
         ax.plot(t, v_est[0, :], color="tab:red", label="$V_x$ estimated")
         ax.plot(t, v_est[1, :], color="tab:blue", label="$V_y$ estimated")
-        ax.plot(t, P_est[2, 2, :], label="error estimated $V_x$")
-        ax.plot(t, P_est[3, 3, :], label="error estimated $V_y$")
+        if SHOW_OUTPUT_FILT:
+            ax.plot(t, v_est_curr[0, :], color="tab:red", label="$V_x$ estimated current horizon", linestyle="-.")
+            ax.plot(t, v_est_curr[1, :], color="tab:blue", label="$V_y$ estimated current horizon", linestyle="-.")
     plt.xlabel("t (s)")
     plt.ylabel("$V$ (m/s)")
     ax.legend()
@@ -382,17 +417,53 @@ def main():
     ax.plot(t, theta, label="groundtruth")
     if DRAW_ESTIMATED:
         ax.plot(t, theta_est, label="estimated")
-        ax.plot(t, P_est[4, 4, :], label="error estimated")
+        if SHOW_OUTPUT_FILT:
+            ax.plot(t, theta_est_curr, label="estimated current horizon")
     plt.xlabel("t (s)")
     plt.ylabel(r"$\theta$ (rad)")
     ax.legend()
     plt.savefig(results_path + "theta." + IMAGE_EXTENSION)
+
+    # Errors
+    fig, ax = plt.subplots()
+    ax.set_title("Velocity error")
+    ax.plot(t, abs(v[0, :]-v_est[0, :]), color="tab:red", label="error $V_x$")
+    ax.plot(t, abs(v[1, :]-v_est[1, :]), color="tab:blue", label="error $V_y$")
+    ax.plot(t, np.sqrt(P_est[2, 2, :]), color="tab:red", label=r"$\sigma$ estimated $V_x$",linestyle="--")
+    ax.plot(t, np.sqrt(P_est[3, 3, :]), color="tab:blue", label=r"$\sigma$ estimated $V_y$",linestyle="-.")
+    plt.xlabel("t (s)")
+    plt.ylabel("error (m/s)")
+    ax.legend()
+    plt.savefig(results_path + "V_error." + IMAGE_EXTENSION)
+
+    fig, ax = plt.subplots()
+    ax.set_title("Position error")
+    ax.plot(t, abs(p[0, :]-p_est[0, :]), color="tab:red", label="error $P_x$")
+    ax.plot(t, abs(p[1, :]-p_est[1, :]), color="tab:blue", label="error $P_y$")
+    ax.plot(t, np.sqrt(P_est[0, 0, :]), color="tab:red", label=r"$\sigma$ estimated $P_x$",linestyle="--")
+    ax.plot(t, np.sqrt(P_est[1, 1, :]), color="tab:blue", label=r"$\sigma$ estimated $P_y$",linestyle="-.")
+    plt.xlabel("t (s)")
+    plt.ylabel("error (m)")
+    ax.legend()
+    plt.savefig(results_path + "P_error." + IMAGE_EXTENSION)
+    
+    fig, ax = plt.subplots()
+    ax.set_title("Tilt error")
+    ax.plot(t, abs(theta-theta_est), label=r"error $\theta$")
+    ax.plot(t, np.sqrt(P_est[4, 4, :]), label=r"$\sigma$ estimated $\theta$")
+    plt.xlabel("t (s)")
+    plt.ylabel("error (rad)")
+    ax.legend()
+    plt.savefig(results_path + "theta_error." + IMAGE_EXTENSION)
+    
 
     fig, ax = plt.subplots()
     ax.set_title("Y versus X")
     ax.plot(p[0, :], p[1, :], label="groundtruth")
     if DRAW_ESTIMATED:
         ax.plot(p_est[0, :], p_est[1, :], label="P estimated")
+        if SHOW_OUTPUT_FILT:
+            ax.plot(p_est_curr[0, :], p_est_curr[1, :], label="P estimated current horizon")
     plt.xlabel("$P_x$ (m)")
     plt.ylabel("$P_y$ (m)")
     ax.legend()
@@ -434,21 +505,10 @@ def main():
     ax.set_aspect("equal")
     plt.savefig(results_path + "gps." + IMAGE_EXTENSION)
 
-    fig, ax = plt.subplots()
-    ax.set_title("Elementos diagonales de la matriz de covarianzas")
-    ax.plot(t, P_est[0, 0, :], label="$P_x$")
-    ax.plot(t, P_est[1, 1, :], label="$P_y$")
-    ax.plot(t, P_est[2, 2, :], label="$V_x$")
-    ax.plot(t, P_est[3, 3, :], label="$V_y$")
-    ax.plot(t, P_est[4, 4, :], label=r"$\theta$")
-    plt.xlabel("$t$ (s)")
-    plt.ylabel("m,m,m/s,m/s,rad")
-    ax.legend()
-    plt.savefig(results_path + "P_est_diag." + IMAGE_EXTENSION)
 
     fig, ax = plt.subplots()
     ax.set_title("Matriz de covarianzas")
-    # Parece que es diagonal
+    # Es diagonal
     ax.plot(t, P_est[0, 1, :], label="$P_{est}$[0,1]")
     ax.plot(t, P_est[0, 2, :], label="$P_{est}$[0,2]")
     ax.plot(t, P_est[0, 3, :], label="$P_{est}$[0,3]")
@@ -465,7 +525,7 @@ def main():
     ax.plot(t, P_est[3, 3, :], label="$V_y$", linestyle="--")
     plt.xlabel("$t$ (s)")
     ax.legend()
-    plt.savefig(results_path + "P_est" + IMAGE_EXTENSION)
+    plt.savefig(results_path + "P_est." + IMAGE_EXTENSION)
 
     if SHOW_PLOTS: 
         plt.show()
