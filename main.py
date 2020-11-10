@@ -38,9 +38,10 @@ IMAGE_EXTENSION = "png"
 
 # Fusion flags
 FUSE_GPS = True
-
 HANDLE_DELAYS = False
-
+TAU_P = 1 
+TAU_V = 1 
+TAU_theta = 1 
 
 
 # Control se realiza sobre los estados reales para acotar más el efecto del estimador
@@ -312,13 +313,17 @@ def main():
     # Matriz de covarianzas
     P_est = np.empty((5, 5, DATA_L))*np.nan 
 
-    # buffer
+    # Buffer de medidas
     max_delay = max(GPS_DELAY, 0)
     buffer_size = int(max_delay / DT)  # TODO: redondear hacia arriba?
     buffer_ekf = [{}] * buffer_size
     gps_insert_pos = int(GPS_DELAY / DT) - 1
 
+    # Buffer de estados
+    buffer_output = [{}] * buffer_size
+
     for i in range(1, DATA_L):
+
         ## Fill buffer
         # Sensors with no delay (pos 0)
         buffer_ekf.insert(0, {"accel": accel[:, i], "gyro": gyro[i]})
@@ -355,6 +360,7 @@ def main():
             )
         )
 
+        ## Output filter
         [p_est_curr[:, i], v_est_curr[:, i], theta_est_curr[i]] = output_filter(
                 p_est_curr[:, i - 1],
                 v_est_curr[:, i - 1],
@@ -362,6 +368,32 @@ def main():
                 accel[:, i],
                 gyro[i],
             )
+        # Fill output buffer
+        buffer_output.insert(0, {"p": p_est_curr[:,i], "v":v_est_curr[:, i] , "theta": theta_est_curr[i] })
+
+        ## Corrección
+
+        # Pop buffer
+        delayed_state = buffer_output.pop()
+
+        if "p" in delayed_meas.keys():
+            p_delayed = delayed_state["p"]
+            v_delayed = delayed_state["v"]
+            theta_delayed = delayed_state["theta"]
+
+            p_error =       p_est[:, i] - p_delayed
+            v_error =       v_est[:, i] - v_delayed
+            theta_error =   theta_est[:, i] - theta_delayed
+    
+            for index, elem  in enumerate(buffer_output):
+                # TODO: improve control
+                buffer_output[index]["p"] = buffer_output[index]["p"] + theta_error* TAU_P
+                buffer_output[index]["v"] = buffer_output[index]["v"] + theta_error* TAU_V
+                buffer_output[index]["theta"] = buffer_output[index]["theta"] + theta_error* TAU_THETA
+
+            p_est_curr[:, i] = buffer_output[0]["p"] 
+            v_est_curr[:, i] = buffer_output[0]["v"]
+            theta_est_curr[i] = buffer_output[0]["theta"]
 
     # create result folders
     subdir_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
