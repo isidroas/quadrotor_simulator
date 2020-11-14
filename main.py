@@ -23,7 +23,7 @@ ACCEL_NOISE = 1  # m/s^2
 # GYRO_NOISE = 0.015 # rad/s
 GYRO_NOISE = 0.03  # rad/s
 GPS_NOISE= 0.7 # m
-GPS_NOISE= 0.1 # m
+GPS_NOISE= 0.2 # m
 #GPS_DELAY = 0.2  # s
 GPS_DELAY = 1  # s
 GPS_DELAY = 1  # s
@@ -33,16 +33,18 @@ GPS_PERIOD = 0.3 # s
 DRAW_ESTIMATED = True
 SHOW_ANIMATED = False
 SHOW_PLOTS = False
+SHOW_GPS = False
 IMAGE_FOLDER = "images/"
-IMAGE_EXTENSION = "png"
+IMAGE_EXTENSION = "pdf"
 
 # Fusion flags
-FUSE_GPS = True
+FUSE_GPS = False
 HANDLE_DELAYS = False
 OUTPUT_CORRECTION = False
 TAU_P = 0.01 
 TAU_V = 0.01 
 TAU_THETA = 0.0
+
 
 
 # Control se realiza sobre los estados reales para acotar más el efecto del estimador
@@ -242,7 +244,7 @@ def main():
     accel = np.zeros((2, DATA_L))
     accel_gt = np.zeros((2, DATA_L))
     gyro = np.zeros(DATA_L)
-    gps = np.zeros((2, DATA_L))
+    gps = np.empty((2, DATA_L))*np.nan
 
     # Setpoints
     yd_ref = np.zeros(DATA_L)
@@ -286,6 +288,7 @@ def main():
             accel_gt[:, i] + randn(2) * ACCEL_NOISE
         )  # TODO: Habría que multiplicarlo por la inversa de rot_mat?
         gyro[i] = thetad[i] + randn(1) * GYRO_NOISE
+
         if i > GPS_DELAY / DT:
             gps[:, i] = p[:, int(i - GPS_DELAY / DT)] + randn(2) * GPS_NOISE
         else:
@@ -411,14 +414,26 @@ def main():
     with open(results_path + "parametros.txt", "w") as f:
         f.write(str(globals()))
 
+    # Activate global grid
+    plt.rcParams['axes.facecolor'] = 'white'
+    plt.rcParams['axes.edgecolor'] = 'white'
+    plt.rcParams['axes.grid'] = True
+    plt.rcParams['grid.alpha'] = 1
+    plt.rcParams['grid.color'] = "#cccccc"
+
+    plt.rcParams.update({'font.size': 16})
+    plt.rcParams.update({'font.weight': 'bold'})
+
     # Plot results
     fig, ax = plt.subplots()
     ax.set_title("Posición X")
-    ax.plot(t, p[0, :], label="$P$ Groundtruth")
+    ax.plot(t, p[0, :], label="$P_x$ Groundtruth")
     if DRAW_ESTIMATED:
-        ax.plot(t, p_est[0, :], label="$P$ EKF")
+        ax.plot(t, p_est[0, :], label="$P_x$ EKF")
         if OUTPUT_CORRECTION:
-            ax.plot(t, p_output[0, :], label="$P$ output")
+            ax.plot(t, p_output[0, :], label="$P_x$ output")
+    if SHOW_GPS:
+        ax.scatter(t, gps[0, :], label="$P_x$ GPS", marker="x", color="tab:green")
     plt.xlabel("t (s)")
     plt.ylabel("$P_x$ (m)")
     ax.legend()
@@ -426,11 +441,13 @@ def main():
 
     fig, ax = plt.subplots()
     ax.set_title("Posición Y")
-    ax.plot(t, p[1, :], label="$P$ groundtruth")
+    ax.plot(t, p[1, :], label="$P_y$ Groundtruth")
     if DRAW_ESTIMATED:
-        ax.plot(t, p_est[1, :], label="$P$ EKF")
+        ax.plot(t, p_est[1, :], label="$P_y$ EKF")
         if OUTPUT_CORRECTION:
-            ax.plot(t, p_output[1, :], label="$P$ output")
+            ax.plot(t, p_output[1, :], label="$P_y$ output")
+    if SHOW_GPS:
+        ax.scatter(t, gps[1, :], label="$P_y$ GPS", marker="x", color="tab:green")
     plt.xlabel("t (s)")
     plt.ylabel("$P_y$ (m)")
     ax.legend()
@@ -438,11 +455,13 @@ def main():
 
     fig, ax = plt.subplots()
     ax.set_title("Y vs X")
-    ax.plot(p[0, :], p[1, :], label="groundtruth")
+    ax.plot(p[0, :], p[1, :], label="$P$ Groundtruth")
     if DRAW_ESTIMATED:
-        ax.plot(p_est[0, :], p_est[1, :], label="P estimated")
+        ax.plot(p_est[0, :], p_est[1, :], label="$P$ EKF")
         if OUTPUT_CORRECTION:
-            ax.plot(p_output[0, :], p_output[1, :], label="P estimated current horizon")
+            ax.plot(p_output[0, :], p_output[1, :], label="$P$ output")
+    if SHOW_GPS:
+        ax.scatter(gps[0, :], gps[1, :], label="$P$ GPS", marker="x", color="tab:green")
     plt.xlabel("$P_x$ (m)")
     plt.ylabel("$P_y$ (m)")
     ax.legend()
@@ -490,10 +509,10 @@ def main():
     fig, ax = plt.subplots()
     ax.set_title("Acelerómetro")
     ax.plot(
-        t, accel_gt[0, :], color="tab:red", label="$a_x$ groundtruth", linestyle="--"
+        t, accel_gt[0, :], color="tab:red", label="$a_x$ Groundtruth", linestyle="--"
     )
     ax.plot(
-        t, accel_gt[1, :], color="tab:blue", label="$a_y$ groundtruth", linestyle="--"
+        t, accel_gt[1, :], color="tab:blue", label="$a_y$ Groundtruth", linestyle="--"
     )
     ax.plot(t, accel[0, :], color="tab:red", label="$a_x$ measure")
     ax.plot(t, accel[1, :], color="tab:blue", label="$a_y$ measure")
@@ -504,7 +523,7 @@ def main():
 
     fig, ax = plt.subplots()
     ax.set_title(r"Giróscopo ($\omega$)")
-    ax.plot(t, thetad, label="groundtruth")
+    ax.plot(t, thetad, label="Groundtruth")
     ax.plot(t, gyro, label="measure")
     plt.xlabel("t (s)")
     plt.ylabel(r"$\omega$ (rad/s)")
@@ -513,7 +532,7 @@ def main():
 
     fig, ax = plt.subplots()
     ax.set_title("GPS")
-    ax.plot(p[0, :], p[1, :], label="groundtruth")
+    ax.plot(p[0, :], p[1, :], label="Groundtruth")
     ax.plot(gps[0, :], gps[1, :], label="measure", linestyle=" ", marker="x")
     plt.xlabel("$P_x$ (m)")
     plt.ylabel("$P_y$ (m)")
