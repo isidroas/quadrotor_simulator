@@ -18,14 +18,9 @@ G_CONSTANT = 9.8  # m/s^2
 INERTIA = MASS * 0.45 ** 2 / 12  # Kg.m^2
 DT = 0.01  # s # Reducir el paso mejora la precisión de la predicción, aunque haya ruido
 
-# ACCEL_NOISE = 0.35 # m/s^2
-ACCEL_NOISE = 1  # m/s^2
-# GYRO_NOISE = 0.015 # rad/s
+ACCEL_NOISE = 0.25  # m/s^2
 GYRO_NOISE = 0.03  # rad/s
-GPS_NOISE= 0.7 # m
-GPS_NOISE= 0.2 # m
-#GPS_DELAY = 0.2  # s
-GPS_DELAY = 1  # s
+GPS_NOISE= 0.01 # m
 GPS_DELAY = 1  # s
 GPS_PERIOD = 0.3 # s
 
@@ -34,14 +29,15 @@ DRAW_ESTIMATED = True
 SHOW_ANIMATED = False
 SHOW_PLOTS = False
 SHOW_GPS = False
+SHOW_OUTPUT_CORRECTION = True
 IMAGE_FOLDER = "images/"
-IMAGE_EXTENSION = "pdf"
+IMAGE_EXTENSION = "png"
 
 # Fusion flags
-FUSE_GPS = False
+FUSE_GPS = True
 HANDLE_DELAYS = False
 OUTPUT_CORRECTION = False
-TAU_P = 0.01 
+TAU_P = 0.5 
 TAU_V = 0.01 
 TAU_THETA = 0.0
 
@@ -315,6 +311,11 @@ def main():
     p_output_del = np.empty((2, DATA_L))*np.nan
     theta_output_del = np.empty(DATA_L)*np.nan
 
+    # Corrección aplicada al filtro de salida
+    v_correction = np.empty((2, DATA_L))*np.nan
+    p_correction = np.empty((2, DATA_L))*np.nan
+    theta_correction = np.empty(DATA_L)*np.nan
+
     # Matriz de covarianzas
     P_est = np.empty((5, 5, DATA_L))*np.nan 
 
@@ -400,9 +401,13 @@ def main():
             v_output[:, i] = buffer_output[0]["v"]
             theta_output[i] = buffer_output[0]["theta"]
             
-            p_output_del[:,i] =  buffer_output[0]["p"]
-            v_output_del[:,i] =  buffer_output[0]["v"]
-            theta_output_del[i] =  buffer_output[0]["theta"]
+            p_output_del[:,i] =  p_delayed
+            v_output_del[:,i] =  v_delayed
+            theta_output_del[i] =  theta_delayed
+
+            p_correction[:,i] =  p_error * TAU_P
+            v_correction[:,i] =  v_error * TAU_V
+            theta_correction[i] =  theta_error * TAU_THETA
             
 
     # create result folders
@@ -432,6 +437,9 @@ def main():
         ax.plot(t, p_est[0, :], label="$P_x$ EKF")
         if OUTPUT_CORRECTION:
             ax.plot(t, p_output[0, :], label="$P_x$ output")
+            ax.plot(t, p_output_del[0, :], label="$P_x$ output delayed", color="tab:purple", linestyle="--")
+            if SHOW_OUTPUT_CORRECTION:
+                ax.plot(t, p_correction[0, :], label="$P_x$ correction")
     if SHOW_GPS:
         ax.scatter(t, gps[0, :], label="$P_x$ GPS", marker="x", color="tab:green")
     plt.xlabel("t (s)")
@@ -446,6 +454,9 @@ def main():
         ax.plot(t, p_est[1, :], label="$P_y$ EKF")
         if OUTPUT_CORRECTION:
             ax.plot(t, p_output[1, :], label="$P_y$ output")
+            ax.plot(t, p_output_del[1, :], label="$P_y$ output delayed", color="tab:purple", linestyle="--")
+            if SHOW_OUTPUT_CORRECTION:
+                ax.plot(t, p_correction[1, :], label="$P_y$ correction")
     if SHOW_GPS:
         ax.scatter(t, gps[1, :], label="$P_y$ GPS", marker="x", color="tab:green")
     plt.xlabel("t (s)")
@@ -475,6 +486,9 @@ def main():
         ax.plot(t, v_est[0, :], label="$V_x$ EKF")
         if OUTPUT_CORRECTION:
             ax.plot(t, v_output[0, :], label="$V_x$ output")
+            ax.plot(t, v_output_del[0, :], label="$V_x$ output delayed", color="tab:purple", linestyle="--")
+            if SHOW_OUTPUT_CORRECTION:
+                ax.plot(t, v_correction[0, :], label="$V_x$ correction")
     plt.xlabel("t (s)")
     plt.ylabel("$V$ (m/s)")
     ax.legend()
@@ -487,6 +501,9 @@ def main():
         ax.plot(t, v_est[1, :], label="$V_y$ EKF")
         if OUTPUT_CORRECTION:
             ax.plot(t, v_output[1, :], label="$V_y$ output")
+            ax.plot(t, v_output_del[1, :], label="$V_y$ output delayed", color="tab:purple", linestyle="--")
+            if SHOW_OUTPUT_CORRECTION:
+                ax.plot(t, v_correction[1, :], label="$V_y$ correction")
     plt.xlabel("t (s)")
     plt.ylabel("$V$ (m/s)")
     ax.legend()
@@ -499,6 +516,9 @@ def main():
         ax.plot(t, theta_est, label=r"$\theta$ EKF")
         if OUTPUT_CORRECTION:
             ax.plot(t, theta_output, label=r"$\theta$ output")
+            ax.plot(t, theta_output_del, label=r"$\theta$ output delyed", color="tab:purple", linestyle="--")
+            if SHOW_OUTPUT_CORRECTION:
+                ax.plot(t, theta_correction, label=r"$\theta$ correction", color="tab:purple", linestyle="--")
     plt.xlabel("t (s)")
     plt.ylabel(r"$\theta$ (rad)")
     ax.legend()
